@@ -4,3 +4,10 @@
 
 [[plugins]]
   package = "@netlify/plugin-nextjs"
+
+# Increase serverless function timeout to 60 seconds for RSS aggregation
+[functions]
+  included_files = ["src/lib/aggregation/**"]
+
+[functions."api/cron/aggregate"]
+  timeout = 60
