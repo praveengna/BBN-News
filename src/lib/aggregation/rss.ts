@@ -3,9 +3,11 @@ import slugify from 'slugify'
 import { createClient } from '@supabase/supabase-js'
 import * as cheerio from 'cheerio'
 import { processNewsItem } from '../ai/news-processor'
-import { downloadAndHostImage } from '../media/downloader'
 import crypto from 'crypto'
 import stringSimilarity from 'string-similarity'
+
+// Max articles to insert per feed per cron call — keeps us under the 10s serverless limit
+const MAX_ARTICLES_PER_FEED = 5
 
 function getCanonicalUrl(url: string) {
   try {
@@ -76,12 +78,20 @@ export async function runRSSAggregation() {
     let itemsAdded = 0
     let status = 'success'
     let errorMessage = null
+    const feedStartTime = Date.now()
 
     try {
       console.log(`Fetching feed: ${feed.name} (${feed.url})`)
       const parsedFeed = await parser.parseURL(feed.url)
 
       for (const item of parsedFeed.items) {
+        // Stop if we've already added enough articles for this feed this run
+        if (itemsAdded >= MAX_ARTICLES_PER_FEED) break
+        // Stop if this feed has taken more than 7 seconds already
+        if (Date.now() - feedStartTime > 7000) {
+          console.log(`[Cron] Feed ${feed.name} time budget exceeded, moving on.`)
+          break
+        }
         itemsProcessed++
         
         if (!item.title || !item.link) continue
@@ -156,11 +166,9 @@ export async function runRSSAggregation() {
         //   aiResult = await processNewsItem(item.title, plainTextContent)
         // }
 
-        // Download and host Image
-        let hostedImageUrl = null
-        if (imageUrl) {
-          hostedImageUrl = await downloadAndHostImage(imageUrl, item.title)
-        }
+        // Download and host Image — SKIPPED to stay within serverless time limits.
+        // We use the original source image URL directly instead.
+        const hostedImageUrl = imageUrl
 
         const rawSlug = slugify(item.title, { lower: true, strict: true }).substring(0, 80)
         const slug = `${rawSlug}-${Math.random().toString(36).substring(2, 8)}`
