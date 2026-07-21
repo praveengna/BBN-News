@@ -28,9 +28,7 @@ function generateHash(title: string, url: string) {
 }
 
 export async function runRSSAggregation() {
-  console.log('Starting Advanced RSS Aggregation...')
-  let totalProcessed = 0
-  let totalAdded = 0
+  console.log('Starting RSS Aggregation (single-feed round-robin)...')
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ''
   const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || ''
@@ -41,7 +39,7 @@ export async function runRSSAggregation() {
   }
 
   const supabase = createClient(supabaseUrl, supabaseServiceKey)
-  
+
   const parser = new Parser({
     customFields: {
       item: [
@@ -51,36 +49,49 @@ export async function runRSSAggregation() {
     }
   })
 
-  // 1. Fetch active feeds that are due for a refresh
+  // Round-robin: pick the single active feed that was fetched least recently
   const { data: feeds, error: feedsError } = await supabase
     .from('rss_feeds')
     .select('*')
     .eq('is_active', true)
-    // In a real interval system we'd filter by time: .lt('last_fetched_at', ...), but we fetch all active here for simplicity
-    .order('priority', { ascending: false })
+    .order('last_fetched_at', { ascending: true, nullsFirst: true })
+    .limit(1)
 
-  if (feedsError || !feeds) {
-    console.error('Failed to fetch RSS feeds:', feedsError)
-    return { error: 'Failed to fetch RSS feeds' }
+  if (feedsError || !feeds || feeds.length === 0) {
+    console.error('No active RSS feeds found:', feedsError)
+    return { error: 'No active RSS feeds' }
   }
 
-  // Pre-fetch recent 1000 articles titles for similarity check
+  const feed = feeds[0]
+  console.log(`Processing feed: ${feed.name}`)
+
+  // Pre-fetch recent 200 article titles for duplicate check (reduced for speed)
   const { data: recentArticles } = await supabase
     .from('articles')
     .select('title')
     .order('created_at', { ascending: false })
-    .limit(1000)
-  
-  const recentTitles = recentArticles?.map(a => a.title) || []
+    .limit(200)
 
-  for (const feed of feeds) {
-    let itemsProcessed = 0
-    let itemsAdded = 0
-    let status = 'success'
-    let errorMessage = null
-    const feedStartTime = Date.now()
+  const recentTitles = recentArticles?.map((a: any) => a.title) || []
 
-    try {
+  // Process this single feed
+  const result = await processFeed(supabase, parser, feed, recentTitles)
+
+  // Run cleanup every call (it's fast — just a DB update)
+  await cleanUpOldArticles(supabase)
+
+  console.log(`RSS Aggregation complete. Feed: ${feed.name}, Processed: ${result.processed}, Added: ${result.added}`)
+  return { success: true, feed: feed.name, processed: result.processed, added: result.added }
+}
+
+async function processFeed(supabase: any, parser: any, feed: any, recentTitles: string[]) {
+  let itemsProcessed = 0
+  let itemsAdded = 0
+  let status = 'success'
+  let errorMessage = null
+  const feedStartTime = Date.now()
+
+  try {
       console.log(`Fetching feed: ${feed.name} (${feed.url})`)
       const parsedFeed = await parser.parseURL(feed.url)
 
@@ -278,15 +289,7 @@ export async function runRSSAggregation() {
         error_message: errorMessage
       })
 
-    totalProcessed += itemsProcessed
-    totalAdded += itemsAdded
-  }
-
-  // Run cleanup after aggregation
-  await cleanUpOldArticles(supabase)
-
-  console.log(`RSS Aggregation complete. Processed: ${totalProcessed}, Added: ${totalAdded}`)
-  return { success: true, processed: totalProcessed, added: totalAdded }
+  return { processed: itemsProcessed, added: itemsAdded }
 }
 
 async function cleanUpOldArticles(supabase: any) {
